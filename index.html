@@ -206,6 +206,20 @@
       color: var(--color-accent);
     }
 
+    .badge.manual {
+      background: rgba(255, 152, 0, 0.12);
+      color: #e65100;
+      font-size: 0.7rem;
+      padding: 0.1rem 0.45rem;
+    }
+
+    .badge-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #e65100;
+    }
+
     .input-row {
       display: flex;
       flex-wrap: wrap;
@@ -343,7 +357,7 @@
     <img src="logo-maisonmoisan.jpg" alt="Maison Moisan" class="logo" />
     <div class="titles">
       <div class="app-title">Maison Moisan – Ménages & URSSAF</div>
-      <div class="app-subtitle">Grand Casimir & Petit Prince</div>
+      <div class="app-subtitle">Grand Casimir & Petit Prince & Locaux</div>
     </div>
   </header>
 
@@ -379,6 +393,9 @@
           <div>
             <h3>Détail par appartement</h3>
             <div id="month-apartments-table"></div>
+            <p class="muted mt-05">
+              <span class="badge manual"><span class="badge-dot"></span> Modifié manuellement</span>
+            </p>
           </div>
           <div>
             <h3>Totaux du mois</h3>
@@ -453,7 +470,7 @@
         <h2>Appartements</h2>
         <p class="muted mb-05">
           Vous pouvez ajuster ici les paramètres des appartements. Les cellules indiquent où lire le nombre de ménages
-          dans chaque feuille mensuelle du Google Sheets.
+          dans chaque feuille mensuelle du Google Sheets (sauf Locaux qui est uniquement géré dans l'application).
         </p>
         <div id="apartments-settings"></div>
       </div>
@@ -501,7 +518,7 @@
       { id: "T4", label: "T4 – Octobre / Novembre / Décembre", months: [9,10,11] },
     ];
 
-    const STORAGE_KEY = "mm_cleaning_app_state_v1";
+    const STORAGE_KEY = "mm_cleaning_app_state_v2";
 
     // --------------- ÉTAT ----------------
 
@@ -527,14 +544,19 @@
             name: "Petit Prince",
             hoursPerCleaning: 2,
             cell: "J2"
+          },
+          {
+            code: "LOC",
+            name: "Locaux",
+            hoursPerCleaning: 1,
+            cell: "" // pas dans le Sheet
           }
         ]
       },
-      frozenYears: {}, // { "2025": true }
-      // monthlyData[year][monthIndex] = { apartments: {code: {cleanings, hours, amount}}, totals: {...} }
-      monthlyData: {},
-      // monthPaid[year][monthIndex] = { paid: bool, date: "YYYY-MM-DD" }
-      monthPaid: {}
+      frozenYears: {},     // { "2025": true }
+      monthlyData: {},     // données venant de l'API
+      monthPaid: {},       // infos de paiement
+      manualHours: {}      // overrides d'heures par année/mois/appart
     };
 
     // --------------- UTILITAIRES ----------------
@@ -544,10 +566,9 @@
         const raw = localStorage.getItem(STORAGE_KEY);
         if (raw) {
           const parsed = JSON.parse(raw);
-          // merge minimalement pour éviter de casser en cas d’évolution
           state = { ...state, ...parsed };
-          // merge settings
           state.settings = { ...state.settings, ...(parsed.settings || {}) };
+          state.manualHours = parsed.manualHours || {};
         }
       } catch (e) {
         console.warn("Impossible de charger l'état depuis localStorage", e);
@@ -588,7 +609,6 @@
       const yearSelect = document.getElementById("year-select");
       yearSelect.innerHTML = "";
 
-      // On propose l'année courante, l'année suivante et quelques années avant
       const currentYear = new Date().getFullYear();
       const years = [];
       for (let y = currentYear - 3; y <= currentYear + 1; y++) {
@@ -612,20 +632,16 @@
       return !!state.frozenYears[year];
     }
 
-    // Vérifie si on doit auto-geler une année précédente
     function autoFreezeIfNeeded() {
       const now = new Date();
       const currentYear = now.getFullYear();
       const previousYear = currentYear - 1;
 
-      if (previousYear < 2000) return; // sécurité
-
+      if (previousYear < 2000) return;
       if (isYearFrozen(previousYear)) return;
 
-      // On considère la date limite = 31/12 de l'année précédente à 20h
-      const freezeDeadline = new Date(previousYear, 11, 31, 20, 0, 0); // mois 11 = décembre
+      const freezeDeadline = new Date(previousYear, 11, 31, 20, 0, 0);
       if (now > freezeDeadline) {
-        // On "gèle" l'année précédente automatiquement
         freezeYear(previousYear, { silent: true });
         const freezeStatus = document.getElementById("freeze-status");
         if (freezeStatus) {
@@ -635,30 +651,81 @@
       }
     }
 
+    // --------------- MANUAL HOURS / LOC ----------------
+
+    function getManualHours(year, monthIndex, code) {
+      if (!state.manualHours[year] ||
+          !state.manualHours[year][monthIndex] ||
+          typeof state.manualHours[year][monthIndex][code] === "undefined") {
+        return null;
+      }
+      return state.manualHours[year][monthIndex][code];
+    }
+
+    function setManualHours(year, monthIndex, code, hours) {
+      if (!state.manualHours[year]) state.manualHours[year] = {};
+      if (!state.manualHours[year][monthIndex]) state.manualHours[year][monthIndex] = {};
+      state.manualHours[year][monthIndex][code] = hours;
+      saveState();
+    }
+
+    function getEffectiveApartmentMonth(year, monthIndex, code) {
+      const monthlyYear = getYearMonthlyData(year);
+      const monthData = monthlyYear[monthIndex];
+      const apCfg = state.settings.apartments.find(a => a.code === code);
+      const hourlyRate = state.settings.hourlyRate || 29;
+
+      let base = {
+        name: apCfg ? apCfg.name : code,
+        cleanings: 0,
+        hours: 0,
+        amount: 0
+      };
+
+      if (monthData && monthData.apartments && monthData.apartments[code]) {
+        const src = monthData.apartments[code];
+        base = {
+          name: src.name || base.name,
+          cleanings: src.cleanings || 0,
+          hours: src.hours || 0,
+          amount: src.amount || 0
+        };
+      }
+
+      const manual = getManualHours(year, monthIndex, code);
+      if (manual !== null && !isNaN(manual)) {
+        base.hours = manual;
+        base.amount = base.hours * hourlyRate;
+      } else if (code === "LOC") {
+        // Locaux : par défaut 1h / mois
+        base.hours = 1;
+        base.amount = base.hours * hourlyRate;
+      }
+
+      return base;
+    }
+
+    function computeMonthlyTotals(year, monthIndex) {
+      let totalCleanings = 0;
+      let totalHours = 0;
+      let totalAmount = 0;
+
+      state.settings.apartments.forEach(ap => {
+        const info = getEffectiveApartmentMonth(year, monthIndex, ap.code);
+        totalCleanings += info.cleanings || 0;
+        totalHours += info.hours || 0;
+        totalAmount += info.amount || 0;
+      });
+
+      return {
+        cleanings: totalCleanings,
+        hours: totalHours,
+        amount: totalAmount
+      };
+    }
+
     // --------------- CHARGEMENT DES DONNÉES ----------------
 
-    /**
-     * Appelle l'API (Apps Script par exemple) pour récupérer les nombres de ménages
-     * par mois et par appartement pour une année donnée, puis calcule heures & montants.
-     *
-     * Format JSON attendu (exemple) :
-     * {
-     *   "year": 2025,
-     *   "months": [
-     *     { "monthIndex": 0, "January": { "GRD": 4, "PRC": 5 } },
-     *     ...
-     *   ]
-     * }
-     *
-     * Mais pour simplifier, on va supposer :
-     * {
-     *   "year": 2025,
-     *   "months": [
-     *     { "name": "January", "GRD": 4, "PRC": 5 },
-     *     ...
-     *   ]
-     * }
-     */
     async function fetchYearFromApi(year) {
       const apiUrl = state.settings.apiUrl;
       if (!apiUrl) {
@@ -675,10 +742,9 @@
 
     function computeMonthlyDataFromRaw(year, rawData) {
       const monthly = getYearMonthlyData(year);
-      const apartments = state.settings.apartments;
+      const apartments = state.settings.apartments.filter(ap => ap.code !== "LOC");
       const hourlyRate = state.settings.hourlyRate || 29;
 
-      // rawData.months : tableau de 12 objets { name: "January", GRD: n, PRC: n, ... }
       if (!rawData || !Array.isArray(rawData.months)) {
         console.warn("Données API inattendues pour l'année", year, rawData);
         return;
@@ -716,11 +782,9 @@
     }
 
     async function loadYearData(year, options = { force: false }) {
-      // Si année gelée, on ne recharge jamais depuis l'API
       if (isYearFrozen(year) && !options.force) {
         return;
       }
-      // Si on a déjà des données et pas force, on ne recharge pas
       if (state.monthlyData[year] && !options.force) {
         return;
       }
@@ -732,8 +796,6 @@
     // --------------- GEL D'ANNÉE ----------------
 
     function freezeYear(year, opts = { silent: false }) {
-      // Ici on se contente de marquer l'année comme gelée.
-      // Les données monthlyData[year] déjà présentes restent en localStorage.
       state.frozenYears[year] = true;
       saveState();
 
@@ -823,40 +885,52 @@
       document.getElementById("month-title").textContent = `${monthNameFr} ${year}`;
       document.getElementById("month-subtitle").textContent = `Onglet Google Sheets : "${monthNameEn}"`;
 
-      const monthly = getYearMonthlyData(year)[monthIndex];
-
-      // Détail par appartement
+      // Détail par appartement (heures éditables)
       const apartmentsContainer = document.getElementById("month-apartments-table");
-      if (!monthly) {
-        apartmentsContainer.innerHTML = `<p class="muted">Aucune donnée disponible pour ce mois. Assurez-vous que l'API renvoie bien les informations.</p>`;
-      } else {
-        let html = `<table>
-          <thead>
-            <tr>
-              <th>Appartement</th>
-              <th>Ménages</th>
-              <th>Heures</th>
-              <th>Montant</th>
-            </tr>
-          </thead>
-          <tbody>`;
-        state.settings.apartments.forEach(ap => {
-          const info = monthly.apartments[ap.code] || { cleanings: 0, hours: 0, amount: 0 };
-          html += `<tr>
-            <td>${ap.name} (${ap.code})</td>
-            <td>${info.cleanings}</td>
-            <td>${info.hours.toFixed(1)}</td>
-            <td>${formatMoney(info.amount)}</td>
-          </tr>`;
-        });
-        html += `</tbody></table>`;
-        apartmentsContainer.innerHTML = html;
-      }
+
+      let html = `<table>
+        <thead>
+          <tr>
+            <th>Appartement</th>
+            <th>Ménages</th>
+            <th>Heures</th>
+            <th>Montant</th>
+          </tr>
+        </thead>
+        <tbody>`;
+
+      state.settings.apartments.forEach(ap => {
+        const info = getEffectiveApartmentMonth(year, monthIndex, ap.code);
+        const manual = getManualHours(year, monthIndex, ap.code) !== null;
+        html += `<tr>
+          <td>
+            ${ap.name} (${ap.code})
+            ${manual ? `<span class="badge manual"><span class="badge-dot"></span> modifié</span>` : ""}
+          </td>
+          <td>${info.cleanings}</td>
+          <td>
+            <input 
+              type="number" 
+              step="0.1" 
+              value="${info.hours.toFixed(1)}"
+              data-year="${year}"
+              data-month="${monthIndex}"
+              data-code="${ap.code}"
+              class="hours-input"
+              style="width: 80px; padding: 0.2rem 0.3rem; border-radius: 6px; border: 1px solid #dddddd; font-size: 0.8rem;"
+            />
+          </td>
+          <td>${formatMoney(info.amount)}</td>
+        </tr>`;
+      });
+
+      html += `</tbody></table>`;
+      apartmentsContainer.innerHTML = html;
 
       // Totaux du mois
       const summaryContainer = document.getElementById("month-summary");
       summaryContainer.innerHTML = "";
-      const totals = monthly ? monthly.totals : { cleanings: 0, hours: 0, amount: 0 };
+      const totals = computeMonthlyTotals(year, monthIndex);
 
       const items = [
         { label: "Total ménages", value: totals.cleanings },
@@ -884,7 +958,6 @@
       paidCheckbox.onchange = () => {
         const info = getPaidInfo(year, monthIndex);
         info.paid = paidCheckbox.checked;
-        // Si on coche comme payé et qu'il n'y a pas encore de date, on met aujourd'hui.
         if (info.paid && !info.date) {
           const today = new Date();
           info.date = today.toISOString().slice(0,10);
@@ -910,16 +983,13 @@
       document.getElementById("quarter-title").textContent = `${quarter.id} ${year}`;
       document.getElementById("quarter-subtitle").textContent = quarter.label;
 
-      // Détail du trimestre (par mois & appart)
       const detailContainer = document.getElementById("quarter-detail-table");
-      const monthlyYear = getYearMonthlyData(year);
 
       let rows = [];
       quarter.months.forEach(mIndex => {
         const monthLabel = MONTHS_FR[mIndex];
-        const monthData = monthlyYear[mIndex];
         state.settings.apartments.forEach(ap => {
-          const info = monthData ? (monthData.apartments[ap.code] || { cleanings: 0, hours: 0, amount: 0 }) : { cleanings: 0, hours: 0, amount: 0 };
+          const info = getEffectiveApartmentMonth(year, mIndex, ap.code);
           rows.push({
             monthIndex: mIndex,
             monthLabel,
@@ -967,12 +1037,12 @@
       let totalAmount = 0;
 
       quarter.months.forEach(mIndex => {
-        const monthData = monthlyYear[mIndex];
-        if (monthData && monthData.totals) {
-          totalCleanings += monthData.totals.cleanings || 0;
-          totalHours += monthData.totals.hours || 0;
-          totalAmount += monthData.totals.amount || 0;
-        }
+        state.settings.apartments.forEach(ap => {
+          const info = getEffectiveApartmentMonth(year, mIndex, ap.code);
+          totalCleanings += info.cleanings || 0;
+          totalHours += info.hours || 0;
+          totalAmount += info.amount || 0;
+        });
       });
 
       const items = [
@@ -1028,10 +1098,8 @@
     }
 
     function renderSettingsView() {
-      // Source / API
       document.getElementById("api-url").value = state.settings.apiUrl || "";
 
-      // Appartements
       const apContainer = document.getElementById("apartments-settings");
       apContainer.innerHTML = "";
       state.settings.apartments.forEach((ap, idx) => {
@@ -1060,7 +1128,6 @@
         apContainer.appendChild(div);
       });
 
-      // Taux URSSAF & tarif horaire
       document.getElementById("hourly-rate").value = state.settings.hourlyRate;
       document.getElementById("urssaf-total-rate").value = state.settings.urssafTotalRate;
       document.getElementById("urssaf-aziza-rate").value = state.settings.urssafAzizaRate;
@@ -1087,7 +1154,6 @@
       renderQuarterTabs();
       renderSettingsView();
 
-      // Charge les données pour l’année active (si possible)
       try {
         await loadYearData(state.activeYear);
       } catch (e) {
@@ -1097,7 +1163,6 @@
       renderMonthsView();
       renderQuartersView();
 
-      // Événements tabs
       document.getElementById("tab-months").addEventListener("click", () => {
         state.activeTab = "months";
         saveState();
@@ -1115,7 +1180,6 @@
         renderSettingsView();
       });
 
-      // Sélection d'année
       document.getElementById("year-select").addEventListener("change", async (e) => {
         const newYear = Number(e.target.value);
         state.activeYear = newYear;
@@ -1130,16 +1194,13 @@
         renderQuartersView();
       });
 
-      // Geler l'année (bouton en haut)
       document.getElementById("freeze-year-btn").addEventListener("click", () => {
         freezeYear(state.activeYear);
       });
-      // Geler depuis les paramètres
       document.getElementById("freeze-year-btn-settings").addEventListener("click", () => {
         freezeYear(state.activeYear);
       });
 
-      // Test API
       document.getElementById("test-api-btn").addEventListener("click", async () => {
         const apiStatus = document.getElementById("api-status");
         apiStatus.textContent = "Test de connexion en cours...";
@@ -1168,12 +1229,9 @@
         }
       });
 
-      // Sauvegarde des paramètres / appartements / taux
       document.getElementById("save-settings-btn").addEventListener("click", () => {
-        // URL
         state.settings.apiUrl = document.getElementById("api-url").value.trim();
 
-        // Taux
         const hourlyRate = Number(document.getElementById("hourly-rate").value || 0);
         const urssafTotalRate = Number(document.getElementById("urssaf-total-rate").value || 0);
         const urssafAzizaRate = Number(document.getElementById("urssaf-aziza-rate").value || 0);
@@ -1182,7 +1240,6 @@
         state.settings.urssafTotalRate = urssafTotalRate;
         state.settings.urssafAzizaRate = urssafAzizaRate;
 
-        // Appartements
         const apInputs = document.querySelectorAll("#apartments-settings input");
         apInputs.forEach(input => {
           const idx = Number(input.getAttribute("data-ap-index"));
@@ -1199,17 +1256,11 @@
         updateUrssafYourPartDisplay();
         document.getElementById("settings-status").textContent = "Paramètres enregistrés.";
         document.getElementById("settings-status").className = "status ok mt-05";
-
-        // Recalcul des montants (à partir des données brutes déjà stockées)
-        // Ici on suppose que l'API renvoie toujours le nombre de ménages brut,
-        // donc pour que les changements de taux se reflètent, il faudrait recharger depuis l'API.
-        // Pour simplifier : on indique juste que les nouveaux taux s'appliqueront aux prochains rechargements.
       });
 
       document.getElementById("urssaf-total-rate").addEventListener("input", updateUrssafYourPartDisplay);
       document.getElementById("urssaf-aziza-rate").addEventListener("input", updateUrssafYourPartDisplay);
 
-      // Mise à jour en direct des paramètres appartements (sans attendre "Enregistrer")
       document.getElementById("apartments-settings").addEventListener("input", (e) => {
         const input = e.target;
         if (!input.hasAttribute("data-ap-index")) return;
@@ -1221,6 +1272,22 @@
         }
         state.settings.apartments[idx][field] = val;
         saveState();
+      });
+
+      // modification des heures dans la vue Mois
+      document.getElementById("month-apartments-table").addEventListener("input", (e) => {
+        const target = e.target;
+        if (!target.classList.contains("hours-input")) return;
+
+        const year = Number(target.getAttribute("data-year"));
+        const monthIndex = Number(target.getAttribute("data-month"));
+        const code = target.getAttribute("data-code");
+        let hours = Number(target.value || 0);
+        if (hours < 0) hours = 0;
+
+        setManualHours(year, monthIndex, code, hours);
+        renderMonthsView();
+        renderQuartersView();
       });
     }
 
