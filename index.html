@@ -1173,8 +1173,12 @@
       renderQuarterTabs();
       renderSettingsView();
 
+      const initialYear = state.activeYear;
+      // Si l'année est gelée -> pas de force, on garde le snapshot local
+      const forceReload = !isYearFrozen(initialYear);
+
       try {
-        await loadYearData(state.activeYear);
+        await loadYearData(initialYear, { force: forceReload });
       } catch (e) {
         console.warn("Impossible de charger les données pour l'année active :", e);
         pushDebug("Erreur loadYearData init", { error: String(e) });
