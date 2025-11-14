@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
-  <title>Maison Moisan – Ménages & URSSAF</title>
+  <title>Maison Moisan – Ménages & URSSAF (diag)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
   <!-- PWA manifest -->
@@ -261,6 +261,21 @@
     .mt-1 { margin-top: 1rem; }
     .mb-05 { margin-bottom: 0.5rem; }
 
+    /* Debug panel */
+    .debug-box {
+      font-family: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.75rem;
+      background: #111;
+      color: #f5f5f5;
+      border-radius: 8px;
+      padding: 0.5rem 0.6rem;
+      max-height: 220px;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
+
+    .debug-box strong { color: #ffca28; }
+
     @media (max-width: 600px) {
       header { align-items: flex-start; }
       header img.logo { height: 32px; }
@@ -273,7 +288,7 @@
     <img src="logo-maisonmoisan.jpg" alt="Maison Moisan" class="logo" />
     <div class="titles">
       <div class="app-title">Maison Moisan – Ménages & URSSAF</div>
-      <div class="app-subtitle">Grand Casimir & Petit Prince & Locaux</div>
+      <div class="app-subtitle">Grand Casimir & Petit Prince & Locaux – <span id="app-version-label"></span></div>
     </div>
   </header>
 
@@ -413,10 +428,77 @@
         <button class="btn btn-primary btn-sm" id="save-settings-btn">Enregistrer les paramètres</button>
         <div id="settings-status" class="status info mt-05"></div>
       </div>
+
+      <!-- DEBUG PANEL -->
+      <div class="card">
+        <h2>Debug (diag)</h2>
+        <p class="muted">
+          Ce panneau affiche l’état interne de l’app, l’URL API utilisée, les derniers appels GET/POST,
+          et permet de tester un POST vers l’onglet <code>Overrides</code>.
+        </p>
+        <div class="input-row">
+          <label>Version de l'app</label>
+          <span id="debug-version-label" class="badge accent"></span>
+        </div>
+        <div class="input-row">
+          <label>Dernier GET</label>
+          <span id="debug-last-get" class="muted"></span>
+        </div>
+        <div class="input-row">
+          <label>Dernier POST</label>
+          <span id="debug-last-post" class="muted"></span>
+        </div>
+        <div class="input-row">
+          <label>API URL active</label>
+          <span id="debug-api-url" class="muted"></span>
+        </div>
+        <div class="input-row">
+          <label>Overrides chargés</label>
+          <span id="debug-overrides-count" class="muted"></span>
+        </div>
+        <button class="btn btn-outline btn-sm" id="debug-test-post">Tester un POST vers Overrides (LOC)</button>
+        <div class="mt-05 debug-box" id="debug-log-box"></div>
+      </div>
     </section>
   </main>
 
   <script>
+    // ==========================
+    //   CONFIG DIAGNOSTIC
+    // ==========================
+    const APP_VERSION = "diag-2025-02-URSSAF-Overrides-v1";
+
+    console.log("VERSION INDEX.HTML :", APP_VERSION);
+
+    const debugState = {
+      lastGet: null,
+      lastPost: null,
+      overridesCount: 0
+    };
+
+    function pushDebug(message, details) {
+      const box = document.getElementById("debug-log-box");
+      if (!box) {
+        console.log("DEBUG:", message, details || "");
+        return;
+      }
+      const stamp = new Date().toLocaleTimeString("fr-FR");
+      let line = `[${stamp}] ${message}`;
+      if (details) {
+        try {
+          line += " " + JSON.stringify(details);
+        } catch (e) {
+          line += " " + String(details);
+        }
+      }
+      box.textContent = line + "\n" + box.textContent;
+      console.log("DEBUG:", message, details || "");
+    }
+
+    // ==========================
+    //   CONSTANTES / ÉTAT
+    // ==========================
+
     const MONTHS_FR = [
       "Janvier","Février","Mars","Avril","Mai","Juin",
       "Juillet","Août","Septembre","Octobre","Novembre","Décembre"
@@ -457,6 +539,10 @@
       manualHours: {}
     };
 
+    // ==========================
+    //   UTILITAIRES
+    // ==========================
+
     function loadState() {
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
@@ -465,9 +551,13 @@
           state = { ...state, ...parsed };
           state.settings = { ...state.settings, ...(parsed.settings || {}) };
           state.manualHours = parsed.manualHours || {};
+          pushDebug("État chargé depuis localStorage", { hasApiUrl: !!state.settings.apiUrl });
+        } else {
+          pushDebug("Aucun état trouvé dans localStorage");
         }
       } catch (e) {
         console.warn("Impossible de charger l'état depuis localStorage", e);
+        pushDebug("Erreur loadState", { error: String(e) });
       }
     }
 
@@ -481,9 +571,7 @@
     }
 
     function getYearMonthlyData(year) {
-      if (!state.monthlyData[year]) {
-        state.monthlyData[year] = {};
-      }
+      if (!state.monthlyData[year]) state.monthlyData[year] = {};
       return state.monthlyData[year];
     }
 
@@ -529,6 +617,7 @@
           freezeStatus.textContent = `L'année ${previousYear} a été archivée automatiquement à la première ouverture.`;
           freezeStatus.className = "status ok mt-05";
         }
+        pushDebug("Auto-freeze exécuté pour l'année précédente", { year: previousYear });
       }
     }
 
@@ -542,35 +631,48 @@
     }
 
     function setManualHours(year, monthIndex, code, hours) {
-  if (!state.manualHours[year]) state.manualHours[year] = {};
-  if (!state.manualHours[year][monthIndex]) state.manualHours[year][monthIndex] = {};
-  state.manualHours[year][monthIndex][code] = hours;
-  saveState();
+      if (!state.manualHours[year]) state.manualHours[year] = {};
+      if (!state.manualHours[year][monthIndex]) state.manualHours[year][monthIndex] = {};
+      state.manualHours[year][monthIndex][code] = hours;
+      saveState();
 
-  const apiUrl = state.settings.apiUrl;
-  if (!apiUrl) return;
+      const apiUrl = state.settings.apiUrl;
+      if (!apiUrl) {
+        pushDebug("POST override ignoré : pas d'API URL", { year, monthIndex, code, hours });
+        return;
+      }
 
-  try {
-    const body = new URLSearchParams({
-      year: String(year),
-      monthIndex: String(monthIndex),
-      code: String(code),
-      hours: String(hours)
-    }).toString();
+      try {
+        const body = new URLSearchParams({
+          year: String(year),
+          monthIndex: String(monthIndex),
+          code: String(code),
+          hours: String(hours)
+        }).toString();
 
-    fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body
-    }).catch(err => {
-      console.warn("Erreur POST override:", err);
-    });
-  } catch (err) {
-    console.warn("Exception POST override:", err);
-  }
-}
+        pushDebug("ENVOI POST override", { apiUrl, year, monthIndex, code, hours });
+
+        fetch(apiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body
+        })
+        .then(res => {
+          debugState.lastPost = `${new Date().toLocaleTimeString("fr-FR")} – ${res.status}`;
+          updateDebugPanel();
+          pushDebug("Réponse POST override", { status: res.status });
+        })
+        .catch(err => {
+          debugState.lastPost = `${new Date().toLocaleTimeString("fr-FR")} – ERREUR`;
+          updateDebugPanel();
+          pushDebug("Erreur POST override (catch)", { error: String(err) });
+        });
+      } catch (err) {
+        debugState.lastPost = `${new Date().toLocaleTimeString("fr-FR")} – EXCEPTION`;
+        updateDebugPanel();
+        pushDebug("Exception POST override", { error: String(err) });
+      }
+    }
 
     function getEffectiveApartmentMonth(year, monthIndex, code) {
       const monthlyYear = getYearMonthlyData(year);
@@ -620,13 +722,22 @@
       return { cleanings: totalCleanings, hours: totalHours, amount: totalAmount };
     }
 
+    // ==========================
+    //   API (GET)
+    // ==========================
+
     async function fetchYearFromApi(year) {
       const apiUrl = state.settings.apiUrl;
       if (!apiUrl) throw new Error("Aucune URL API définie dans les paramètres.");
       const url = apiUrl + (apiUrl.includes("?") ? "&" : "?") + "year=" + encodeURIComponent(year);
+      pushDebug("Appel GET API", { url });
       const response = await fetch(url);
       if (!response.ok) throw new Error("Erreur API : " + response.status);
-      return await response.json();
+      const data = await response.json();
+      debugState.lastGet = `${new Date().toLocaleTimeString("fr-FR")} – OK (${year})`;
+      updateDebugPanel();
+      pushDebug("Réponse GET API OK", { year });
+      return data;
     }
 
     function computeMonthlyDataFromRaw(year, rawData) {
@@ -662,6 +773,8 @@
         monthly[monthIndex] = monthInfo;
       });
 
+      // Overrides
+      debugState.overridesCount = 0;
       if (Array.isArray(rawData.overrides)) {
         if (!state.manualHours[year]) state.manualHours[year] = {};
         rawData.overrides.forEach(o => {
@@ -669,19 +782,32 @@
           if (isNaN(mi)) return;
           if (!state.manualHours[year][mi]) state.manualHours[year][mi] = {};
           state.manualHours[year][mi][o.code] = Number(o.hours) || 0;
+          debugState.overridesCount++;
         });
       }
+      updateDebugPanel();
+      pushDebug("Overrides chargés depuis API", { year, count: debugState.overridesCount });
 
       state.monthlyData[year] = monthly;
       saveState();
     }
 
     async function loadYearData(year, options = { force: false }) {
-      if (isYearFrozen(year) && !options.force) return;
-      if (state.monthlyData[year] && !options.force) return;
+      if (isYearFrozen(year) && !options.force) {
+        pushDebug("Année gelée, on ne recharge pas les données", { year });
+        return;
+      }
+      if (state.monthlyData[year] && !options.force) {
+        pushDebug("Données déjà présentes pour l'année (pas de GET)", { year });
+        return;
+      }
       const data = await fetchYearFromApi(year);
       computeMonthlyDataFromRaw(year, data);
     }
+
+    // ==========================
+    //   GEL D'ANNÉE
+    // ==========================
 
     function freezeYear(year, opts = { silent: false }) {
       state.frozenYears[year] = true;
@@ -698,7 +824,12 @@
           freezeStatus.className = "status ok mt-05";
         }
       }
+      pushDebug("Année gelée manuellement", { year });
     }
+
+    // ==========================
+    //   RENDU UI
+    // ==========================
 
     function renderTabs() {
       document.getElementById("tab-months").classList.toggle("active", state.activeTab === "months");
@@ -998,6 +1129,11 @@
       document.getElementById("urssaf-total-rate").value = state.settings.urssafTotalRate;
       document.getElementById("urssaf-aziza-rate").value = state.settings.urssafAzizaRate;
       updateUrssafYourPartDisplay();
+
+      // Debug header
+      document.getElementById("debug-version-label").textContent = APP_VERSION;
+      document.getElementById("debug-api-url").textContent = state.settings.apiUrl || "(non défini)";
+      updateDebugPanel();
     }
 
     function updateUrssafYourPartDisplay() {
@@ -1007,6 +1143,25 @@
       document.getElementById("urssaf-your-part").textContent =
         ` Votre part actuelle serait de ${yourRate.toFixed(1)} %.`;
     }
+
+    function updateDebugPanel() {
+      const verLabel = document.getElementById("app-version-label");
+      if (verLabel) verLabel.textContent = APP_VERSION;
+
+      const lastGet = document.getElementById("debug-last-get");
+      const lastPost = document.getElementById("debug-last-post");
+      const apiUrlSpan = document.getElementById("debug-api-url");
+      const ovCount = document.getElementById("debug-overrides-count");
+
+      if (lastGet) lastGet.textContent = debugState.lastGet || "(aucun GET)";
+      if (lastPost) lastPost.textContent = debugState.lastPost || "(aucun POST)";
+      if (apiUrlSpan) apiUrlSpan.textContent = state.settings.apiUrl || "(non défini)";
+      if (ovCount) ovCount.textContent = String(debugState.overridesCount || 0);
+    }
+
+    // ==========================
+    //   INIT
+    // ==========================
 
     async function init() {
       loadState();
@@ -1022,11 +1177,13 @@
         await loadYearData(state.activeYear);
       } catch (e) {
         console.warn("Impossible de charger les données pour l'année active :", e);
+        pushDebug("Erreur loadYearData init", { error: String(e) });
       }
 
       renderMonthsView();
       renderQuartersView();
 
+      // Tabs
       document.getElementById("tab-months").addEventListener("click", () => {
         state.activeTab = "months";
         saveState();
@@ -1044,6 +1201,7 @@
         renderSettingsView();
       });
 
+      // Changement d'année
       document.getElementById("year-select").addEventListener("change", async e => {
         const newYear = Number(e.target.value);
         state.activeYear = newYear;
@@ -1053,6 +1211,7 @@
           await loadYearData(newYear, { force: true });
         } catch (err) {
           console.warn("Erreur de chargement pour l'année", newYear, err);
+          pushDebug("Erreur loadYearData change year", { error: String(err) });
         }
         renderMonthsView();
         renderQuartersView();
@@ -1079,6 +1238,7 @@
 
         state.settings.apiUrl = url;
         saveState();
+        updateDebugPanel();
 
         try {
           const year = state.activeYear;
@@ -1090,6 +1250,7 @@
         } catch (e) {
           apiStatus.textContent = "Erreur lors de l'appel API : " + e.message;
           apiStatus.className = "status error";
+          pushDebug("Erreur test API", { error: String(e) });
         }
       });
 
@@ -1111,6 +1272,7 @@
 
         saveState();
         updateUrssafYourPartDisplay();
+        updateDebugPanel();
         const status = document.getElementById("settings-status");
         status.textContent = "Paramètres enregistrés.";
         status.className = "status ok mt-05";
@@ -1144,10 +1306,27 @@
         renderMonthsView();
         renderQuartersView();
       });
+
+      // Bouton de debug POST
+      const debugPostBtn = document.getElementById("debug-test-post");
+      if (debugPostBtn) {
+        debugPostBtn.addEventListener("click", () => {
+          const year = state.activeYear;
+          const monthIndex = state.activeMonthIndex;
+          const testHours = 1.5;
+          setManualHours(year, monthIndex, "LOC", testHours);
+          pushDebug("Test POST manuel déclenché (LOC)", { year, monthIndex, hours: testHours });
+        });
+      }
+
+      updateDebugPanel();
     }
 
     document.addEventListener("DOMContentLoaded", () => {
-      init().catch(err => console.error(err));
+      init().catch(err => {
+        console.error(err);
+        pushDebug("Erreur init globale", { error: String(err) });
+      });
     });
 
     if ("serviceWorker" in navigator) {
